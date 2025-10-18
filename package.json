@@ -1,0 +1,15 @@
+{
+  "name": "website_checker_bot",
+  "version": "1.1.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.3.1",
+    "sqlite3": "^5.1.6",
+    "telegraf": "^4.12.2",
+    "axios": "^1.6.8",
+    "node-cron": "^3.0.2"
+  }
+}
