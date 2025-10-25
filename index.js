@@ -39,6 +39,41 @@ bot.command("list", (ctx) => {
 	});
 });
 
+// Команда /delete <url>
+bot.command("delete", (ctx) => {
+	const parts = ctx.message.text.split(" ").slice(1);
+	if (parts.length !== 1) return ctx.reply("Используй: /delete <url>");
+
+	const url = parts[0].trim();
+	db.run("DELETE FROM websites WHERE url = ?", [url], function (err) {
+		if (err) return ctx.reply("Ошибка при удалении сайта.");
+		if (this.changes === 0) return ctx.reply("Сайт не найден.");
+		ctx.reply(`🗑️ Сайт ${url} удалён.`);
+	});
+});
+
+// Команда /update <старый_url> <новый_url>
+bot.command("update", (ctx) => {
+	const parts = ctx.message.text.split(" ").slice(1);
+	if (parts.length !== 2)
+		return ctx.reply("Используй: /update <старый_url> <новый_url>");
+
+	const [oldUrl, newUrl] = parts;
+	if (!/^https?:\/\//.test(newUrl)) {
+		return ctx.reply("Новый URL должен начинаться с http:// или https://");
+	}
+
+	db.run(
+		"UPDATE websites SET url = ?, last_status = 'unknown' WHERE url = ?",
+		[newUrl, oldUrl],
+		function (err) {
+			if (err) return ctx.reply("Ошибка при обновлении URL.");
+			if (this.changes === 0) return ctx.reply("Старый URL не найден.");
+			ctx.reply(`✏️ Сайт обновлён: ${oldUrl} → ${newUrl}`);
+		}
+	);
+});
+
 // При получении текста — пробуем сохранить URL
 bot.on("text", (ctx) => {
 	const url = ctx.message.text.trim();
