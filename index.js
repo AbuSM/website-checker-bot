@@ -7,53 +7,93 @@ const cron = require("node-cron");
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const db = new sqlite3.Database("./websites.db");
 
-// Инициализация таблицы
+// Инициализация таблиц
 db.serialize(() => {
+	db.run(`
+		CREATE TABLE IF NOT EXISTS users (
+			id INTEGER PRIMARY KEY,
+			username TEXT,
+			first_name TEXT
+		)
+	`);
+
+	db.run(`
+		CREATE TABLE IF NOT EXISTS websites (
+			id INTEGER PRIMARY KEY,
+			url TEXT,
+			last_status TEXT,
+			user_id INTEGER,
+			FOREIGN KEY (user_id) REFERENCES users(id)
+		)
+	`);
+});
+
+// 🧑 Записываем или обновляем пользователя
+function upsertUser(ctx) {
+	const user = ctx.from;
 	db.run(
-		"CREATE TABLE IF NOT EXISTS websites (id INTEGER PRIMARY KEY, url TEXT, last_status TEXT)"
+		`INSERT INTO users (id, username, first_name)
+		 VALUES (?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET
+			username = excluded.username,
+			first_name = excluded.first_name
+		`,
+		[user.id, user.username || "", user.first_name || ""]
+	);
+}
+
+// Команда /start
+bot.start((ctx) => {
+	upsertUser(ctx);
+	ctx.reply(
+		"Привет! Отправь мне ссылку, и я буду следить за её доступностью."
 	);
 });
 
-// Команда /start
-bot.start((ctx) =>
-	ctx.reply(
-		"Привет! Отправь мне ссылку, и я буду следить за её доступностью."
-	)
-);
-
-// Команда /list — показать все сайты
+// Команда /list — показать сайты пользователя
 bot.command("list", (ctx) => {
-	db.all("SELECT url, last_status FROM websites", (err, rows) => {
-		if (err || rows.length === 0) return ctx.reply("Сайты не найдены.");
-		const msg = rows
-			.map(
-				(r) =>
-					`${r.url} — ${
-						r.last_status === "online"
-							? "🟢 доступен"
-							: "🔴 не работает"
-					}`
-			)
-			.join("\n");
-		ctx.reply(msg);
-	});
+	upsertUser(ctx);
+	db.all(
+		"SELECT url, last_status FROM websites WHERE user_id = ?",
+		[ctx.from.id],
+		(err, rows) => {
+			if (err || rows.length === 0) return ctx.reply("Сайты не найдены.");
+			const msg = rows
+				.map(
+					(r) =>
+						`${r.url} — ${
+							r.last_status === "online"
+								? "🟢 доступен"
+								: "🔴 не работает"
+						}`
+				)
+				.join("\n");
+			ctx.reply(msg);
+		}
+	);
 });
 
-// Команда /delete <url>
+// /delete <url>
 bot.command("delete", (ctx) => {
+	upsertUser(ctx);
 	const parts = ctx.message.text.split(" ").slice(1);
 	if (parts.length !== 1) return ctx.reply("Используй: /delete <url>");
 
 	const url = parts[0].trim();
-	db.run("DELETE FROM websites WHERE url = ?", [url], function (err) {
-		if (err) return ctx.reply("Ошибка при удалении сайта.");
-		if (this.changes === 0) return ctx.reply("Сайт не найден.");
-		ctx.reply(`🗑️ Сайт ${url} удалён.`);
-	});
+	db.run(
+		"DELETE FROM websites WHERE url = ? AND user_id = ?",
+		[url, ctx.from.id],
+		function (err) {
+			if (err) return ctx.reply("Ошибка при удалении сайта.");
+			if (this.changes === 0) return ctx.reply("Сайт не найден.");
+			ctx.reply(`🗑️ Сайт ${url} удалён.`);
+		}
+	);
 });
 
-// Команда /update <старый_url> <новый_url>
+// /update <old_url> <new_url>
 bot.command("update", (ctx) => {
+	upsertUser(ctx);
 	const parts = ctx.message.text.split(" ").slice(1);
 	if (parts.length !== 2)
 		return ctx.reply("Используй: /update <старый_url> <новый_url>");
@@ -64,8 +104,8 @@ bot.command("update", (ctx) => {
 	}
 
 	db.run(
-		"UPDATE websites SET url = ?, last_status = 'unknown' WHERE url = ?",
-		[newUrl, oldUrl],
+		"UPDATE websites SET url = ?, last_status = 'unknown' WHERE url = ? AND user_id = ?",
+		[newUrl, oldUrl, ctx.from.id],
 		function (err) {
 			if (err) return ctx.reply("Ошибка при обновлении URL.");
 			if (this.changes === 0) return ctx.reply("Старый URL не найден.");
@@ -74,8 +114,9 @@ bot.command("update", (ctx) => {
 	);
 });
 
-// При получении текста — пробуем сохранить URL
+// Добавление сайта по тексту
 bot.on("text", (ctx) => {
+	upsertUser(ctx);
 	const url = ctx.message.text.trim();
 	if (!/^https?:\/\//.test(url))
 		return ctx.reply(
@@ -83,8 +124,8 @@ bot.on("text", (ctx) => {
 		);
 
 	db.run(
-		"INSERT INTO websites (url, last_status) VALUES (?, ?)",
-		[url, "unknown"],
+		"INSERT INTO websites (url, last_status, user_id) VALUES (?, ?, ?)",
+		[url, "unknown", ctx.from.id],
 		(err) => {
 			if (err)
 				return ctx.reply(
@@ -97,7 +138,7 @@ bot.on("text", (ctx) => {
 	);
 });
 
-// Периодическая проверка сайтов
+// Автоматическая проверка сайтов
 cron.schedule("*/5 * * * *", () => {
 	db.all("SELECT * FROM websites", (err, rows) => {
 		if (err) return console.error("Ошибка при чтении БД:", err.message);
@@ -119,8 +160,7 @@ cron.schedule("*/5 * * * *", () => {
 							"UPDATE websites SET last_status = ? WHERE id = ?",
 							["offline", row.id]
 						);
-						const userId =
-							process.env.ADMIN_ID || "your_admin_telegram_id";
+						const userId = process.env.ADMIN_ID || row.user_id;
 						bot.telegram.sendMessage(
 							userId,
 							`⚠️ Сайт ${row.url} недоступен!`
@@ -131,9 +171,7 @@ cron.schedule("*/5 * * * *", () => {
 	});
 });
 
-// Запуск бота
+// Запуск
 bot.launch();
-
-// Завершение по сигналам
 process.once("SIGINT", () => bot.stop("SIGINT"));
 process.once("SIGTERM", () => bot.stop("SIGTERM"));
