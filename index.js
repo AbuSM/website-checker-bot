@@ -121,28 +121,54 @@ bot.on("text", (ctx) => {
 // Автоматическая проверка сайтов
 const updateStatusStmt = db.prepare("UPDATE websites SET last_status = ? WHERE id = ?");
 
-cron.schedule("*/5 * * * *", () => {
+const MAX_RETRIES = 3;
+const RETRY_DELAY_MS = 3000;
+
+async function checkSite(url) {
+	for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+		try {
+			const response = await axios.get(url, {
+				timeout: 10000,
+				headers: {
+					"User-Agent": "Mozilla/5.0 (compatible; WebsiteCheckerBot/1.0)",
+				},
+				maxRedirects: 5,
+				// Считаем любой HTTP-ответ как "сайт работает"
+				validateStatus: () => true,
+			});
+			return true; // Сайт ответил — значит работает
+		} catch (err) {
+			// Сетевая ошибка или таймаут — пробуем ещё
+			if (attempt < MAX_RETRIES) {
+				await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+			}
+		}
+	}
+	return false; // Все попытки провалились
+}
+
+cron.schedule("*/5 * * * *", async () => {
 	const rows = db.prepare("SELECT * FROM websites").all();
 
-	rows.forEach((row) => {
-		axios
-			.get(row.url, { timeout: 5000 })
-			.then(() => {
-				if (row.last_status !== "online") {
-					updateStatusStmt.run("online", row.id);
-				}
-			})
-			.catch(() => {
-				if (row.last_status !== "offline") {
-					updateStatusStmt.run("offline", row.id);
-					const userId = process.env.ADMIN_ID || row.user_id;
-					bot.telegram.sendMessage(
-						userId,
-						`⚠️ Сайт ${row.url} недоступен!`
-					);
-				}
-			});
-	});
+	for (const row of rows) {
+		const isOnline = await checkSite(row.url);
+
+		if (isOnline && row.last_status !== "online") {
+			updateStatusStmt.run("online", row.id);
+			if (row.last_status === "offline") {
+				bot.telegram.sendMessage(
+					row.user_id,
+					`✅ Сайт ${row.url} снова доступен!`
+				);
+			}
+		} else if (!isOnline && row.last_status !== "offline") {
+			updateStatusStmt.run("offline", row.id);
+			bot.telegram.sendMessage(
+				row.user_id,
+				`⚠️ Сайт ${row.url} недоступен!`
+			);
+		}
+	}
 });
 
 // Запуск
