@@ -54,22 +54,64 @@ bot.start((ctx) => {
 	);
 });
 
-// Команда /list — показать сайты пользователя
-bot.command("list", (ctx) => {
-	upsertUser(ctx);
-	const rows = db.prepare("SELECT url, last_status FROM websites WHERE user_id = ?").all(ctx.from.id);
-	if (rows.length === 0) return ctx.reply("Сайты не найдены.");
-	const msg = rows
+// Формирует текст и inline-клавиатуру со списком сайтов пользователя
+function buildListMessage(userId) {
+	const rows = db
+		.prepare("SELECT id, url, last_status FROM websites WHERE user_id = ?")
+		.all(userId);
+
+	if (rows.length === 0) {
+		return { text: "Сайты не найдены.", keyboard: undefined };
+	}
+
+	const text = rows
 		.map(
 			(r) =>
 				`${r.url} — ${
 					r.last_status === "online"
 						? "🟢 доступен"
-						: "🔴 не работает"
+						: r.last_status === "offline"
+						? "🔴 не работает"
+						: "⚪ проверяется"
 				}`
 		)
 		.join("\n");
-	ctx.reply(msg);
+
+	// По кнопке удаления на каждый сайт
+	const keyboard = {
+		inline_keyboard: rows.map((r) => [
+			{ text: `🗑️ ${r.url}`, callback_data: `del:${r.id}` },
+		]),
+	};
+
+	return { text, keyboard };
+}
+
+// Команда /list — показать сайты пользователя
+bot.command("list", (ctx) => {
+	upsertUser(ctx);
+	const { text, keyboard } = buildListMessage(ctx.from.id);
+	ctx.reply(text, keyboard ? { reply_markup: keyboard } : undefined);
+});
+
+// Удаление сайта по нажатию inline-кнопки
+bot.action(/^del:(\d+)$/, (ctx) => {
+	upsertUser(ctx);
+	const id = Number(ctx.match[1]);
+
+	const result = db
+		.prepare("DELETE FROM websites WHERE id = ? AND user_id = ?")
+		.run(id, ctx.from.id);
+
+	if (result.changes === 0) {
+		return ctx.answerCbQuery("Сайт не найден.");
+	}
+
+	ctx.answerCbQuery("🗑️ Сайт удалён.");
+
+	// Обновляем сообщение со списком
+	const { text, keyboard } = buildListMessage(ctx.from.id);
+	ctx.editMessageText(text, keyboard ? { reply_markup: keyboard } : undefined);
 });
 
 // /delete <url>
@@ -147,7 +189,38 @@ async function checkSite(url) {
 	return false; // Все попытки провалились
 }
 
-cron.schedule("*/5 * * * *", async () => {
+// Проверяет, есть ли у самого бота доступ в интернет.
+// Если интернета нет, нельзя считать сайты недоступными.
+async function hasInternet() {
+	const probes = [
+		"https://www.google.com",
+		"https://api.telegram.org",
+		"https://1.1.1.1",
+	];
+
+	for (const url of probes) {
+		try {
+			await axios.head(url, {
+				timeout: 5000,
+				validateStatus: () => true,
+			});
+			return true; // Хоть один пробник ответил — интернет есть
+		} catch {
+			// Пробуем следующий
+		}
+	}
+	return false;
+}
+
+// Один цикл проверки всех сайтов
+async function runCheckCycle({ notify = true } = {}) {
+	// Если у бота нет интернета — пропускаем цикл, чтобы не отмечать сайты
+	// недоступными по ошибке.
+	if (!(await hasInternet())) {
+		console.warn("⚠️ Нет интернета — пропускаю проверку сайтов.");
+		return;
+	}
+
 	const rows = db.prepare("SELECT * FROM websites").all();
 
 	for (const row of rows) {
@@ -155,7 +228,7 @@ cron.schedule("*/5 * * * *", async () => {
 
 		if (isOnline && row.last_status !== "online") {
 			updateStatusStmt.run("online", row.id);
-			if (row.last_status === "offline") {
+			if (notify && row.last_status === "offline") {
 				bot.telegram.sendMessage(
 					row.user_id,
 					`✅ Сайт ${row.url} снова доступен!`
@@ -163,15 +236,38 @@ cron.schedule("*/5 * * * *", async () => {
 			}
 		} else if (!isOnline && row.last_status !== "offline") {
 			updateStatusStmt.run("offline", row.id);
-			bot.telegram.sendMessage(
-				row.user_id,
-				`⚠️ Сайт ${row.url} недоступен!`
-			);
+			if (notify) {
+				bot.telegram.sendMessage(
+					row.user_id,
+					`⚠️ Сайт ${row.url} недоступен!`
+				);
+			}
 		}
 	}
+}
+
+cron.schedule("*/5 * * * *", () => runCheckCycle());
+
+// Глобальный обработчик ошибок — чтобы сбои в обработчиках были видны
+bot.catch((err, ctx) => {
+	console.error(`Ошибка при обработке обновления (${ctx?.updateType}):`, err);
 });
 
 // Запуск
-bot.launch();
+bot
+	.launch(() => {
+		console.log("✅ Бот запущен и слушает обновления.");
+		// Сразу проверяем все сайты при старте (без уведомлений),
+		// чтобы статусы были актуальны, а не "проверяется" до первого крона.
+		runCheckCycle({ notify: false }).catch((err) =>
+			console.error("Ошибка стартовой проверки:", err)
+		);
+	})
+	.catch((err) => {
+		// Например, 409 Conflict, если уже запущен другой экземпляр
+		console.error("❌ Не удалось запустить бота:", err);
+		process.exit(1);
+	});
+
 process.once("SIGINT", () => bot.stop("SIGINT"));
 process.once("SIGTERM", () => bot.stop("SIGTERM"));
