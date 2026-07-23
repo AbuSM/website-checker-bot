@@ -175,10 +175,18 @@ async function checkSite(url) {
 					"User-Agent": "Mozilla/5.0 (compatible; WebsiteCheckerBot/1.0)",
 				},
 				maxRedirects: 5,
-				// Считаем любой HTTP-ответ как "сайт работает"
+				// Не даём axios бросать исключение — сами решаем по коду ответа
 				validateStatus: () => true,
 			});
-			return true; // Сайт ответил — значит работает
+			// 5xx (502, 503, 500…) означают, что сервер не работает для
+			// посетителя — считаем сайт недоступным и пробуем ещё раз.
+			if (response.status >= 500) {
+				if (attempt < MAX_RETRIES) {
+					await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+				}
+				continue;
+			}
+			return true; // Ответ с кодом < 500 — сайт работает
 		} catch (err) {
 			// Сетевая ошибка или таймаут — пробуем ещё
 			if (attempt < MAX_RETRIES) {
