@@ -54,8 +54,30 @@ bot.start((ctx) => {
 	);
 });
 
-// Формирует текст и inline-клавиатуру со списком сайтов пользователя
+// Форматирует статус сайта
+function formatStatus(status) {
+	return status === "online"
+		? "🟢 доступен"
+		: status === "offline"
+		? "🔴 не работает"
+		: "⚪ проверяется";
+}
+
+// Формирует текст со списком сайтов пользователя (без кнопок)
 function buildListMessage(userId) {
+	const rows = db
+		.prepare("SELECT id, url, last_status FROM websites WHERE user_id = ?")
+		.all(userId);
+
+	if (rows.length === 0) {
+		return "Сайты не найдены.";
+	}
+
+	return rows.map((r) => `${r.url} — ${formatStatus(r.last_status)}`).join("\n");
+}
+
+// Формирует сообщение для удаления: список сайтов с кнопками-корзинами
+function buildDeleteMessage(userId) {
 	const rows = db
 		.prepare("SELECT id, url, last_status FROM websites WHERE user_id = ?")
 		.all(userId);
@@ -64,18 +86,7 @@ function buildListMessage(userId) {
 		return { text: "Сайты не найдены.", keyboard: undefined };
 	}
 
-	const text = rows
-		.map(
-			(r) =>
-				`${r.url} — ${
-					r.last_status === "online"
-						? "🟢 доступен"
-						: r.last_status === "offline"
-						? "🔴 не работает"
-						: "⚪ проверяется"
-				}`
-		)
-		.join("\n");
+	const text = "Выбери сайт для удаления:";
 
 	// По кнопке удаления на каждый сайт
 	const keyboard = {
@@ -87,11 +98,10 @@ function buildListMessage(userId) {
 	return { text, keyboard };
 }
 
-// Команда /list — показать сайты пользователя
+// Команда /list — показать сайты пользователя (без кнопок удаления)
 bot.command("list", (ctx) => {
 	upsertUser(ctx);
-	const { text, keyboard } = buildListMessage(ctx.from.id);
-	ctx.reply(text, keyboard ? { reply_markup: keyboard } : undefined);
+	ctx.reply(buildListMessage(ctx.from.id));
 });
 
 // Удаление сайта по нажатию inline-кнопки
@@ -109,16 +119,24 @@ bot.action(/^del:(\d+)$/, (ctx) => {
 
 	ctx.answerCbQuery("🗑️ Сайт удалён.");
 
-	// Обновляем сообщение со списком
-	const { text, keyboard } = buildListMessage(ctx.from.id);
+	// Обновляем сообщение со списком для удаления
+	const { text, keyboard } = buildDeleteMessage(ctx.from.id);
 	ctx.editMessageText(text, keyboard ? { reply_markup: keyboard } : undefined);
 });
 
-// /delete <url>
+// /delete — показать список сайтов с кнопками для выбора и удаления.
+// /delete <url> — удалить конкретный сайт (старое поведение сохранено).
 bot.command("delete", (ctx) => {
 	upsertUser(ctx);
 	const parts = ctx.message.text.split(" ").slice(1);
-	if (parts.length !== 1) return ctx.reply("Используй: /delete <url>");
+
+	// Без аргументов — показываем список сайтов с кнопками удаления
+	if (parts.length === 0) {
+		const { text, keyboard } = buildDeleteMessage(ctx.from.id);
+		return ctx.reply(text, keyboard ? { reply_markup: keyboard } : undefined);
+	}
+
+	if (parts.length !== 1) return ctx.reply("Используй: /delete или /delete <url>");
 
 	const url = parts[0].trim();
 	const result = db.prepare("DELETE FROM websites WHERE url = ? AND user_id = ?").run(url, ctx.from.id);
