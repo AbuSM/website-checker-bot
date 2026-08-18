@@ -122,6 +122,20 @@ function buildDeleteMessage(userId) {
 	return { text, keyboard };
 }
 
+// Через сколько автоматически удалять сообщение со списком удаления
+const DELETE_MESSAGE_TTL_MS = 2 * 60 * 1000; // 2 минуты
+
+// Планирует удаление сообщения через DELETE_MESSAGE_TTL_MS.
+// Ошибки (сообщение уже удалено вручную и т.п.) игнорируем.
+function autoDeleteMessage(ctx, msg) {
+	if (!msg) return;
+	setTimeout(() => {
+		ctx.telegram
+			.deleteMessage(msg.chat.id, msg.message_id)
+			.catch(() => {});
+	}, DELETE_MESSAGE_TTL_MS);
+}
+
 // Команда /list — показать сайты пользователя (без кнопок удаления)
 bot.command("list", (ctx) => {
 	upsertUser(ctx);
@@ -157,7 +171,9 @@ bot.command("delete", (ctx) => {
 	// Без аргументов — показываем список сайтов с кнопками удаления
 	if (parts.length === 0) {
 		const { text, keyboard } = buildDeleteMessage(ctx.from.id);
-		return ctx.reply(text, keyboard ? { reply_markup: keyboard } : undefined);
+		return ctx
+			.reply(text, keyboard ? { reply_markup: keyboard } : undefined)
+			.then((msg) => autoDeleteMessage(ctx, msg));
 	}
 
 	if (parts.length !== 1) return ctx.reply("Используй: /delete или /delete <url>");
