@@ -46,6 +46,30 @@ function upsertUser(ctx) {
 	upsertUserStmt.run(user.id, user.username || "", user.first_name || "");
 }
 
+// Приводит ввод к корректному URL: добавляет https:// если протокол не указан.
+// Возвращает нормализованный URL или null, если это не похоже на веб-адрес.
+function normalizeUrl(input) {
+	let value = input.trim();
+	if (!value) return null;
+
+	// Если протокол не указан — добавляем https://
+	if (!/^https?:\/\//i.test(value)) {
+		// Отклоняем другие протоколы (ftp://, mailto: и т.п.)
+		if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) return null;
+		value = "https://" + value;
+	}
+
+	// Проверяем, что получился валидный URL с доменом, содержащим точку
+	try {
+		const parsed = new URL(value);
+		if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+		if (!parsed.hostname.includes(".")) return null;
+		return parsed.href;
+	} catch {
+		return null;
+	}
+}
+
 // Команда /start
 bot.start((ctx) => {
 	upsertUser(ctx);
@@ -151,9 +175,10 @@ bot.command("update", (ctx) => {
 	if (parts.length !== 2)
 		return ctx.reply("Используй: /update <старый_url> <новый_url>");
 
-	const [oldUrl, newUrl] = parts;
-	if (!/^https?:\/\//.test(newUrl)) {
-		return ctx.reply("Новый URL должен начинаться с http:// или https://");
+	const [oldUrl, rawNewUrl] = parts;
+	const newUrl = normalizeUrl(rawNewUrl);
+	if (!newUrl) {
+		return ctx.reply("Новый URL некорректен (например: example.com или https://example.com).");
 	}
 
 	const result = db.prepare("UPDATE websites SET url = ?, last_status = 'unknown' WHERE url = ? AND user_id = ?").run(newUrl, oldUrl, ctx.from.id);
@@ -164,15 +189,15 @@ bot.command("update", (ctx) => {
 // Добавление сайта по тексту
 bot.on("text", (ctx) => {
 	upsertUser(ctx);
-	const url = ctx.message.text.trim();
-	if (!/^https?:\/\//.test(url))
+	const url = normalizeUrl(ctx.message.text);
+	if (!url)
 		return ctx.reply(
-			"Пожалуйста, отправь корректный URL, начиная с http:// или https://"
+			"Пожалуйста, отправь корректный URL (например: example.com или https://example.com)."
 		);
 
 	try {
 		db.prepare("INSERT INTO websites (url, last_status, user_id) VALUES (?, ?, ?)").run(url, "unknown", ctx.from.id);
-		ctx.reply("Добавил сайт в список! Я буду проверять его каждые 5 минут.");
+		ctx.reply(`Добавил ${url} в список! Я буду проверять его каждые 5 минут.`);
 	} catch {
 		ctx.reply("Ошибка при добавлении URL или он уже существует.");
 	}

@@ -1,2 +1,5 @@
 node_modules
 .env
+# Runtime database — do not track (deploys must not overwrite user data)
+websites.db
+websites.db.bak-*
